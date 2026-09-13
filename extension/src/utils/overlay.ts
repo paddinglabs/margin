@@ -54,9 +54,26 @@ export async function initContentScript(ctx: { onInvalidated: (cb: () => void) =
   let cachedMatcher: DOMTextMatcher | null = null;
   let matcherNeedsRebuild = false;
   const injectedStyles = new Set<string>();
+  const ownedHighlights = new Set<string>();
   let overlayEnabled = true;
   let currentUserDid: string | null = null;
   let cachedUserTags: string[] = [];
+
+  function setHighlight(name: string, highlight: Highlight) {
+    CSS.highlights.set(name, highlight);
+    ownedHighlights.add(name);
+  }
+
+  function deleteHighlight(name: string) {
+    CSS.highlights.delete(name);
+    ownedHighlights.delete(name);
+  }
+
+  function clearOwnHighlights() {
+    if (typeof CSS === 'undefined' || !CSS.highlights) return;
+    for (const name of ownedHighlights) CSS.highlights.delete(name);
+    ownedHighlights.clear();
+  }
 
   function getPageUrl(): string {
     const pdfUrl = document.documentElement.dataset.marginPdfUrl;
@@ -263,9 +280,7 @@ export async function initContentScript(ctx: { onInvalidated: (cb: () => void) =
         fetchAnnotations();
       } else {
         activeItems = [];
-        if (typeof CSS !== 'undefined' && CSS.highlights) {
-          CSS.highlights.clear();
-        }
+        clearOwnHighlights();
         sendMessage('updateBadge', { count: 0 });
       }
     }
@@ -571,7 +586,7 @@ export async function initContentScript(ctx: { onInvalidated: (cb: () => void) =
     if (typeof CSS !== 'undefined' && CSS.highlights) {
       const tempHighlight = new Highlight(range);
       const hlName = 'margin-scroll-flash';
-      CSS.highlights.set(hlName, tempHighlight);
+      setHighlight(hlName, tempHighlight);
       injectHighlightStyle(hlName, '#3b82f6');
 
       const flashStyle = document.createElement('style');
@@ -585,7 +600,7 @@ export async function initContentScript(ctx: { onInvalidated: (cb: () => void) =
       document.head.appendChild(flashStyle);
 
       setTimeout(() => {
-        CSS.highlights.delete(hlName);
+        deleteHighlight(hlName);
         flashStyle.remove();
       }, 2500);
     } else {
@@ -860,12 +875,12 @@ export async function initContentScript(ctx: { onInvalidated: (cb: () => void) =
 
     function commitHighlights() {
       if (typeof CSS !== 'undefined' && CSS.highlights) {
-        CSS.highlights.clear();
+        clearOwnHighlights();
         for (const [color, ranges] of Object.entries(rangesByColor)) {
           const highlight = new Highlight(...ranges);
           const safeColor = color.replace(/[^a-zA-Z0-9]/g, '');
           const name = `margin-hl-${safeColor}`;
-          CSS.highlights.set(name, highlight);
+          setHighlight(name, highlight);
           injectHighlightStyle(name, color);
         }
       }
@@ -1325,9 +1340,7 @@ export async function initContentScript(ctx: { onInvalidated: (cb: () => void) =
     const currentUrl = getPageUrl();
     if (currentUrl === lastPolledUrl) return;
     lastPolledUrl = currentUrl;
-    if (typeof CSS !== 'undefined' && CSS.highlights) {
-      CSS.highlights.clear();
-    }
+    clearOwnHighlights();
     injectedStyles.clear();
     document.querySelectorAll('style').forEach((s) => {
       if (s.textContent?.includes('::highlight(margin-hl-')) s.remove();
