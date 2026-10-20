@@ -64,6 +64,7 @@ type FallbackFont = {
 
 const fallbackFontCache = new Map<string, Promise<FallbackFont[]>>();
 const FALLBACK_FONT_CACHE_LIMIT = 200;
+const FALLBACK_FONT_FETCH_TIMEOUT_MS = 3000;
 let fallbackFontSubsetId = 0;
 
 // Matches one @font-face block: "@font-face { font-weight: 400; ... }", not "@media { ... }".
@@ -82,7 +83,9 @@ async function fetchFontFace(
   weight: FallbackWeight,
   src: string,
 ): Promise<FallbackFont | null> {
-  const res = await fetch(src);
+  const res = await fetch(src, {
+    signal: AbortSignal.timeout(FALLBACK_FONT_FETCH_TIMEOUT_MS),
+  });
   if (!res.ok) return null;
   return {
     name,
@@ -100,7 +103,9 @@ async function fetchFallbackFonts(
     family,
   )}:wght@${FALLBACK_WEIGHTS.join(";")}&text=${encodeURIComponent(text)}`;
   // Without a browser User-Agent Google Fonts serves TrueType, which satori can parse.
-  const cssRes = await fetch(cssUrl);
+  const cssRes = await fetch(cssUrl, {
+    signal: AbortSignal.timeout(FALLBACK_FONT_FETCH_TIMEOUT_MS),
+  });
   if (!cssRes.ok) return [];
   const css = await cssRes.text();
 
