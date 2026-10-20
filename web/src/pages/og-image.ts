@@ -30,6 +30,150 @@ function loadFonts() {
   return fontsLoaded;
 }
 
+// Fallback fonts for scripts Inter does not cover (CJK, Thai, Arabic, ...),
+// keyed by the language codes satori passes to loadAdditionalAsset.
+const FALLBACK_FONT_FAMILIES: Record<string, string> = {
+  "ja-JP": "Noto Sans JP",
+  "ko-KR": "Noto Sans KR",
+  "zh-CN": "Noto Sans SC",
+  "zh-TW": "Noto Sans TC",
+  "zh-HK": "Noto Sans HK",
+  "th-TH": "Noto Sans Thai",
+  "bn-IN": "Noto Sans Bengali",
+  "ar-AR": "Noto Sans Arabic",
+  "ta-IN": "Noto Sans Tamil",
+  "ml-IN": "Noto Sans Malayalam",
+  "he-IL": "Noto Sans Hebrew",
+  "te-IN": "Noto Sans Telugu",
+  devanagari: "Noto Sans Devanagari",
+  kannada: "Noto Sans Kannada",
+  symbol: "Noto Sans Symbols",
+  math: "Noto Sans Math",
+  unknown: "Noto Sans",
+};
+
+const FALLBACK_WEIGHTS = [400, 700] as const;
+type FallbackWeight = (typeof FALLBACK_WEIGHTS)[number];
+
+type FallbackFont = {
+  name: string;
+  data: ArrayBuffer;
+  weight: FallbackWeight;
+  style: "normal";
+};
+
+const fallbackFontCache = new Map<string, Promise<FallbackFont[]>>();
+const FALLBACK_FONT_CACHE_LIMIT = 200;
+let fallbackFontSubsetId = 0;
+
+// Matches one @font-face block: "@font-face { font-weight: 400; ... }", not "@media { ... }".
+const FONT_FACE_RE = /@font-face\s*{([^}]*)}/g;
+// Matches "font-weight: 700", not "font-style: normal".
+const FONT_WEIGHT_RE = /font-weight:\s*(\d+)/;
+// Matches "src: url(https://...) format('truetype')", not "format('woff2')".
+const FONT_SRC_RE = /src:\s*url\(([^)]+)\)\s*format\('(?:truetype|opentype)'\)/;
+
+function isFallbackWeight(weight: number): weight is FallbackWeight {
+  return (FALLBACK_WEIGHTS as readonly number[]).includes(weight);
+}
+
+async function fetchFontFace(
+  name: string,
+  weight: FallbackWeight,
+  src: string,
+): Promise<FallbackFont | null> {
+  const res = await fetch(src);
+  if (!res.ok) return null;
+  return {
+    name,
+    data: await res.arrayBuffer(),
+    weight,
+    style: "normal",
+  };
+}
+
+async function fetchFallbackFonts(
+  family: string,
+  text: string,
+): Promise<FallbackFont[]> {
+  const cssUrl = `https://fonts.googleapis.com/css2?family=${encodeURIComponent(
+    family,
+  )}:wght@${FALLBACK_WEIGHTS.join(";")}&text=${encodeURIComponent(text)}`;
+  // Without a browser User-Agent Google Fonts serves TrueType, which satori can parse.
+  const cssRes = await fetch(cssUrl);
+  if (!cssRes.ok) return [];
+  const css = await cssRes.text();
+
+  const faces = [...css.matchAll(FONT_FACE_RE)].flatMap(([, body]) => {
+    const weight = Number(FONT_WEIGHT_RE.exec(body)?.[1]);
+    const src = FONT_SRC_RE.exec(body)?.[1];
+    return src && isFallbackWeight(weight) ? [{ weight, src }] : [];
+  });
+
+  // Each subset needs its own name: satori keeps only the first font per name and weight.
+  const name = `${family} ${++fallbackFontSubsetId}`;
+  const fonts = await Promise.all(
+    faces.map(({ weight, src }) => fetchFontFace(name, weight, src)),
+  );
+  return fonts.filter((f): f is FallbackFont => f !== null);
+}
+
+async function fetchFallbackFontsSafe(
+  family: string,
+  text: string,
+  key: string,
+): Promise<FallbackFont[]> {
+  try {
+    const fonts = await fetchFallbackFonts(family, text);
+    if (fonts.length === 0) fallbackFontCache.delete(key);
+    return fonts;
+  } catch (e) {
+    console.error(`[og-image] Failed to load fallback font ${family}:`, e);
+    fallbackFontCache.delete(key);
+    return [];
+  }
+}
+
+function loadFallbackFont(
+  family: string,
+  segment: string,
+): Promise<FallbackFont[]> {
+  const text = [...new Set(segment)].sort().join("");
+  const key = `${family}\u0000${text}`;
+
+  const cached = fallbackFontCache.get(key);
+  if (cached) return cached;
+
+  if (fallbackFontCache.size >= FALLBACK_FONT_CACHE_LIMIT) {
+    const oldest = fallbackFontCache.keys().next().value;
+    if (oldest !== undefined) fallbackFontCache.delete(oldest);
+  }
+  const promise = fetchFallbackFontsSafe(family, text, key);
+  fallbackFontCache.set(key, promise);
+  return promise;
+}
+
+// Satori may pass several candidates joined by "|", e.g. "ja-JP|zh-CN" for kanji.
+async function loadFallbackFonts(
+  languageCodes: string,
+  segment: string,
+): Promise<FallbackFont[]> {
+  const families = [
+    ...new Set(
+      languageCodes
+        .split("|")
+        .map(
+          (code) =>
+            FALLBACK_FONT_FAMILIES[code] ?? FALLBACK_FONT_FAMILIES.unknown,
+        ),
+    ),
+  ];
+  const fonts = await Promise.all(
+    families.map((family) => loadFallbackFont(family, segment)),
+  );
+  return fonts.flat();
+}
+
 const API_URL = process.env.API_URL || "http://localhost:8081";
 
 interface RecordData {
@@ -1447,8 +1591,9 @@ export const GET: APIRoute = async ({ url }) => {
           } catch {
             // ignore
           }
+          return "";
         }
-        return "";
+        return loadFallbackFonts(code, segment);
       },
     });
 
